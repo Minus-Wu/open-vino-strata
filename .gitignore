@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# LLM Models, GGUF, and OpenVINO compiled caches
+models/
+.ov_cache/
+*.bin
+*.blob
+*.safetensors
+*.onnx
+*.gguf
+
