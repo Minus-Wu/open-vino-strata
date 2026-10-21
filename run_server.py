@@ -75,7 +75,7 @@ def main():
     )
     parser.add_argument("--host", type=str, default="127.0.0.1", help="監聽主機位址 (預設 127.0.0.1)")
     parser.add_argument("--port", type=int, default=12223, help="服務監聽連接埠 (預設 12223)")
-    parser.add_argument("--model_dir", type=str, default=None, help="模型目錄名稱或完整路徑")
+    parser.add_argument("--model_dir", "--model", dest="model_dir", type=str, default=None, help="模型目錄名稱或完整路徑")
     parser.add_argument(
         "--device",
         type=str,
@@ -85,12 +85,16 @@ def main():
     )
     parser.add_argument(
         "--offload_ratio",
+        "--offload-ratio",
+        dest="offload_ratio",
         type=int,
         default=None,
         help="MoE 專家權重卸載至系統 RAM 的比例 (0~100%%，預設 None 由 Strata 自動依顯存預算計算)",
     )
     parser.add_argument(
         "--vram_budget_gb",
+        "--vram-budget",
+        dest="vram_budget_gb",
         type=float,
         default=None,
         help="最大 GPU 顯存預算 (GB)，例如設定 8.0 或 12.0 以模擬/限制低顯存環境",
