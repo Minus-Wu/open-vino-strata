@@ -228,3 +228,4 @@ models/
 *.onnx
 *.gguf
 
+.hf_cache/
