@@ -215,9 +215,17 @@ class OVStrataEngine:
         props: Dict[str, Any] = dict(plan.ov_plugin_config)
         props.update(self.pipeline_kwargs)
 
-        # 設定編譯快取目錄 (.ov_cache)，大幅加快 35B 大模型二次載入速度
-        if self.strata_config.enable_compile_cache:
-            cache_dir = self.project_root / ".ov_cache" / f"{model_path.name}_{plan.target_device}_offload{plan.recommended_offload_ratio}"
+        # OpenVINO 2026 Intel GPU MoE OTD (On-The-fly Offloading) 要求顯式提供 WEIGHTS_PATH 指向 .bin 權重檔
+        if props.get("OFFLOAD_RATIO", 0) > 0 and "WEIGHTS_PATH" not in props:
+            for bin_name in ("openvino_language_model.bin", "openvino_model.bin"):
+                bin_candidate = model_path / bin_name
+                if bin_candidate.exists():
+                    props["WEIGHTS_PATH"] = str(bin_candidate.resolve())
+                    break
+
+        # 設定編譯快取目錄 (.ov_cache)；當啟用 MoE OTD (OFFLOAD_RATIO > 0) 時直接由 .bin 串流權重，不啟用 CACHE_DIR 以免衝突
+        if self.strata_config.enable_compile_cache and props.get("OFFLOAD_RATIO", 0) == 0:
+            cache_dir = self.project_root / ".ov_cache" / f"{model_path.name}_{plan.target_device}"
             cache_dir.mkdir(parents=True, exist_ok=True)
             props["CACHE_DIR"] = str(cache_dir)
 
@@ -276,9 +284,12 @@ class OVStrataEngine:
         has_vlm_files = (target_path / "openvino_vision_embeddings_model.xml").exists() and (
             target_path / "openvino_language_model.xml"
         ).exists()
+        use_vlm_pipe = has_vlm_files and (
+            self.strata_config.enable_vision or not (target_path / "openvino_model.xml").exists()
+        )
 
         try:
-            if has_vlm_files and self.strata_config.enable_vision:
+            if use_vlm_pipe:
                 self._pipe = ov_genai.VLMPipeline(str(target_path), target_device, **props)
                 self._is_vlm_pipeline = True
             else:
@@ -291,21 +302,29 @@ class OVStrataEngine:
                 f"Primary pipeline init with extended Strata properties raised ({first_err}); "
                 "retrying with essential properties..."
             )
-            # 降級容錯：移除可能不被特定裝置/模型支援的進階屬性後重試
+            # 降級容錯：保留關鍵 OFFLOAD_RATIO、WEIGHTS_PATH 與 KV_CACHE_PRECISION 屬性後重試
             safe_props = {
                 k: v
                 for k, v in props.items()
-                if k in ("OFFLOAD_RATIO", "KV_CACHE_PRECISION", "CACHE_DIR")
+                if k in ("OFFLOAD_RATIO", "WEIGHTS_PATH", "KV_CACHE_PRECISION", "CACHE_DIR")
             }
             try:
-                self._pipe = ov_genai.LLMPipeline(
-                    str(target_path), self._tokenizer, target_device, **safe_props
-                )
-                self._is_vlm_pipeline = False
+                if use_vlm_pipe:
+                    self._pipe = ov_genai.VLMPipeline(str(target_path), target_device, **safe_props)
+                    self._is_vlm_pipeline = True
+                else:
+                    self._pipe = ov_genai.LLMPipeline(
+                        str(target_path), self._tokenizer, target_device, **safe_props
+                    )
+                    self._is_vlm_pipeline = False
             except Exception as second_err:
                 logger.warning(f"Retry with safe_props raised ({second_err}); falling back to base init...")
-                self._pipe = ov_genai.LLMPipeline(str(target_path), self._tokenizer, target_device)
-                self._is_vlm_pipeline = False
+                if use_vlm_pipe:
+                    self._pipe = ov_genai.VLMPipeline(str(target_path), target_device)
+                    self._is_vlm_pipeline = True
+                else:
+                    self._pipe = ov_genai.LLMPipeline(str(target_path), self._tokenizer, target_device)
+                    self._is_vlm_pipeline = False
 
         self.model_path = target_path
         self._model_name = target_path.name
@@ -571,10 +590,12 @@ class OVStrataEngine:
         repetition_penalty: float = 1.0,
         stop_strings: Optional[List[str]] = None,
         do_sample: bool = True,
+        apply_chat_template: bool = False,
     ) -> ov_genai.GenerationConfig:
         """建立符合裝置與 MTP 限制的 GenerationConfig"""
         config = ov_genai.GenerationConfig()
         config.max_new_tokens = max_new_tokens
+        config.apply_chat_template = apply_chat_template
 
         use_mtp = bool(self._current_plan and self._current_plan.use_mtp)
 
@@ -626,6 +647,8 @@ class OVStrataEngine:
         """非同步非串流生成，回傳完整文字與 Strata 效能指標"""
         await self.ensure_loaded()
 
+        # 若已由 format_chat_prompt 套用 ChatML (<|im_start|>) 且無圖片，停用底層重複套用 chat_template
+        needs_vlm_template = bool(self._is_vlm_pipeline and images)
         gen_config = self._build_generation_config(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -634,6 +657,7 @@ class OVStrataEngine:
             repetition_penalty=repetition_penalty,
             stop_strings=stop_strings,
             do_sample=do_sample,
+            apply_chat_template=needs_vlm_template,
         )
 
         metrics = EngineMetrics()
@@ -656,9 +680,13 @@ class OVStrataEngine:
             t_start = time.perf_counter()
 
             def _sync_generate():
-                if self._is_vlm_pipeline and images:
+                if self._is_vlm_pipeline:
+                    if images:
+                        return self._pipe.generate(
+                            prompt, images=images, generation_config=gen_config, streamer=_streamer
+                        )
                     return self._pipe.generate(
-                        prompt, images=images, generation_config=gen_config, streamer=_streamer
+                        prompt, generation_config=gen_config, streamer=_streamer
                     )
                 return self._pipe.generate(prompt, gen_config, _streamer)
 
@@ -699,6 +727,7 @@ class OVStrataEngine:
         """非同步串流生成產生器 (SSE-ready)，每產出 token 即 yield 出去，最後一個 chunk 附帶完整 Strata 指標"""
         await self.ensure_loaded()
 
+        needs_vlm_template = bool(self._is_vlm_pipeline and images)
         gen_config = self._build_generation_config(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -707,6 +736,7 @@ class OVStrataEngine:
             repetition_penalty=repetition_penalty,
             stop_strings=stop_strings,
             do_sample=do_sample,
+            apply_chat_template=needs_vlm_template,
         )
 
         metrics = EngineMetrics()
@@ -728,10 +758,15 @@ class OVStrataEngine:
 
         def _run_sync_pipeline():
             try:
-                if self._is_vlm_pipeline and images:
-                    self._pipe.generate(
-                        prompt, images=images, generation_config=gen_config, streamer=_streamer
-                    )
+                if self._is_vlm_pipeline:
+                    if images:
+                        self._pipe.generate(
+                            prompt, images=images, generation_config=gen_config, streamer=_streamer
+                        )
+                    else:
+                        self._pipe.generate(
+                            prompt, generation_config=gen_config, streamer=_streamer
+                        )
                 else:
                     self._pipe.generate(prompt, gen_config, _streamer)
             finally:

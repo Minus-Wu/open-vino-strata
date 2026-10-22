@@ -470,9 +470,15 @@ class DeviceManager:
         ov_plugin_config: Dict[str, Any] = {}
         if "GPU" in target_dev:
             ov_plugin_config["KV_CACHE_PRECISION"] = cfg.kv_cache_precision
-            ov_plugin_config["GPU_ENABLE_LARGE_ALLOCATIONS"] = True
             if self.supports_offload_ratio("GPU") and recommended_offload > 0:
                 ov_plugin_config["OFFLOAD_RATIO"] = recommended_offload
+                # OpenVINO 2026 Intel GPU MoE OTD (On-The-fly Offloading) 要求設定 WEIGHTS_PATH 指向主模型 .bin 檔
+                p_dir = Path(model_path)
+                for bin_name in ("openvino_language_model.bin", "openvino_model.bin"):
+                    bin_candidate = p_dir / bin_name
+                    if bin_candidate.exists():
+                        ov_plugin_config["WEIGHTS_PATH"] = str(bin_candidate.resolve())
+                        break
 
         return StrataPlan(
             model_info=model_info,
