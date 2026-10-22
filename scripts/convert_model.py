@@ -1,9 +1,10 @@
 """
 OpenVINO-Strata 模型轉換與混合精度量化工具 (scripts/convert_model.py)
 功能：
-將 HuggingFace Safetensors 模型 (如 `empero-ai/Qwen3.8-35B-A3B-Distill` 或 `Qwen/Qwen3.6-35B-A3B`)
-轉換並量化為 OpenVINO 2026 INT4 + INT8 混合精度 IR 格式 (`openvino_language_model.xml` / `.bin`)，
-使 35B-A3B MoE 模型能夠直接搭配 OpenVINO `OFFLOAD_RATIO`、`WEIGHTS_PATH` 與 `KV_CACHE_PRECISION="u8"` 進行低顯存分層推論。
+1. 先透過 `curl.exe -L -C -` 斷點續傳將 HuggingFace Safetensors 模型 (如 `empero-ai/Qwen3.8-35B-A3B-Distill`)
+   直接下載至本專案 `.hf_cache/<model_name>` (不透過 HF symlink cache，避免 Windows 空間翻倍或中斷重來)
+2. 呼叫 `optimum-cli export openvino` 轉換並量化為 OpenVINO 2026 INT4 + INT8 混合精度 IR 格式 (`openvino_language_model.xml` / `.bin`)
+3. 轉檔成功後可透過 `--clean-cache` 自動刪除 66 GB 暫存原始權重，僅保留約 18 GB 的 OpenVINO INT4 模型。
 
 量化配方 (對標 OpenVINO 官方 Qwen3.6-35B-A3B-int4-ov 與 PolyStrata 分層策略)：
 - Routed Experts (256 個專家 FFN): INT4 Asymmetric, group_size=64, ratio=1.0
@@ -19,10 +20,13 @@ from pathlib import Path
 from typing import List
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
+from scripts.download_model import download_repo
 
 
 def build_optimum_command(
-    model_id: str,
+    model_source: str,
     output_dir: Path,
     weight_format: str = "int4",
     group_size: int = 64,
@@ -39,16 +43,15 @@ def build_optimum_command(
     else:
         cmd = [str(python_exe), "-m", "optimum.exporters.openvino"]
 
-    # Qwen3.8-35B-A3B-Distill / Qwen3.6-35B-A3B 為 Qwen3_5MoeForConditionalGeneration，需使用 image-text-to-text 導出拆分式架構
     resolved_task = task
     if resolved_task == "auto":
-        if "35b-a3b" in model_id.lower() or "qwen3.8" in model_id.lower() or "qwen3.6" in model_id.lower():
+        if "35b-a3b" in model_source.lower() or "qwen3.8" in model_source.lower() or "qwen3.6" in model_source.lower():
             resolved_task = "image-text-to-text"
         else:
             resolved_task = "text-generation-with-past"
 
     cmd.extend([
-        "--model", model_id,
+        "--model", model_source,
         "--task", resolved_task,
         "--weight-format", weight_format,
         "--group-size", str(group_size),
@@ -68,14 +71,14 @@ def check_conversion_dependencies() -> bool:
         import optimum.intel  # noqa: F401
         import nncf  # noqa: F401
         import torch  # noqa: F401
-        import transformers  # noqa: F401
-        return True
+        import transformers
+        return transformers.__version__.startswith("5.2.")
     except ImportError:
         return False
 
 
 def install_conversion_dependencies() -> int:
-    print("[Info] Installing PyTorch (CPU), transformers>=5.2.0, nncf, and optimum-intel (git main for qwen35moe)...")
+    print("[Info] Installing PyTorch (CPU), transformers==5.2.*, nncf, and optimum-intel (git main for qwen35moe)...")
     cmds = [
         [
             sys.executable, "-m", "pip", "install",
@@ -83,8 +86,12 @@ def install_conversion_dependencies() -> int:
         ],
         [
             sys.executable, "-m", "pip", "install", "-U",
-            "transformers>=5.2.0", "accelerate", "nncf",
+            "accelerate", "nncf",
             "git+https://github.com/huggingface/optimum-intel.git",
+        ],
+        [
+            sys.executable, "-m", "pip", "install",
+            "transformers==5.2.*",
         ],
         [
             sys.executable, "-m", "pip", "install", "-U",
@@ -159,7 +166,7 @@ def main() -> int:
         "--cache-dir",
         type=str,
         default=str(ROOT_DIR / ".hf_cache"),
-        help="Local HuggingFace download cache directory on D: drive (default: ./.hf_cache)",
+        help="Local download staging directory on D: drive (default: ./.hf_cache)",
     )
     parser.add_argument(
         "--clean-cache",
@@ -169,7 +176,7 @@ def main() -> int:
     parser.add_argument(
         "--install-deps",
         action="store_true",
-        help="Automatically install torch, transformers>=5.2.0, optimum-intel, and nncf before exporting",
+        help="Automatically install torch, transformers==5.2.*, optimum-intel, and nncf before exporting",
     )
     parser.add_argument(
         "--dry-run",
@@ -185,8 +192,11 @@ def main() -> int:
         out_dir = ROOT_DIR / "models" / f"{model_short_name}-{args.weight_format}-ov"
 
     hf_cache_dir = Path(args.cache_dir).resolve()
+    is_local_path = Path(args.model_id).exists()
+    local_source_dir = Path(args.model_id).resolve() if is_local_path else (hf_cache_dir / model_short_name)
+
     cmd = build_optimum_command(
-        model_id=args.model_id,
+        model_source=str(local_source_dir),
         output_dir=out_dir,
         weight_format=args.weight_format,
         group_size=args.group_size,
@@ -200,14 +210,14 @@ def main() -> int:
     print(" OpenVINO-Strata Model Conversion & NNCF Quantization Utility")
     print("=" * 84)
     print(f"  Source Model      : {args.model_id}")
+    print(f"  Staging Path      : {local_source_dir} (resumable curl.exe download on D:)")
     print(f"  Target IR Path    : {out_dir}")
-    print(f"  HF Cache Path     : {hf_cache_dir} (avoids C: drive space exhaustion)")
     print(f"  Quantization      : {args.weight_format.upper()} (group_size={args.group_size}, ratio={args.ratio}, sym={args.sym})")
     print(f"  Backup Precision  : {args.backup_precision} (protects MoE Router & Embeddings)")
     print(f"  Export Command    :\n    {' '.join(cmd)}")
     print("-" * 84)
     print("  [Requirement Note]")
-    print("  - Source `empero-ai/Qwen3.8-35B-A3B-Distill` is 66 GB (21 BF16 Safetensors shards).")
+    print("  - Source `empero-ai/Qwen3.8-35B-A3B-Distill` is 66 GB (22 Safetensors files).")
     print("  - Exporting to OpenVINO INT4 IR produces an ~18 GB folder in `models/`.")
     print("  - Requires ~85 GB free disk space on D: (use `--clean-cache` to free the 66 GB after export)")
     print("    and Windows Virtual Memory (Pagefile) >= 64 GB.")
@@ -217,31 +227,41 @@ def main() -> int:
         print("\n[Dry-Run] Exiting without running conversion.")
         return 0
 
-    if args.install_deps or not check_conversion_dependencies():
-        if not args.install_deps:
-            print("\n[Warning] Conversion dependencies (`torch`, `optimum-intel`, `nncf`) are not installed.")
-            print("Run with `--install-deps` to install them automatically.")
+    if not check_conversion_dependencies():
+        if args.install_deps:
+            rc = install_conversion_dependencies()
+            if rc != 0:
+                return rc
+        else:
+            print("\n[Warning] Required conversion packages (`transformers==5.2.*`, `optimum-intel`, `nncf`) are missing or mismatched.")
+            print("Re-run with `--install-deps` to fix automatically.")
             return 1
-        rc = install_conversion_dependencies()
-        if rc != 0:
-            return rc
 
-    hf_cache_dir.mkdir(parents=True, exist_ok=True)
+    # Step 1: 若來源為 HuggingFace Repo ID，先以 curl.exe 斷點續傳下載至 .hf_cache/<model_name>
+    if not is_local_path:
+        print(f"\n[Step 1/2] Downloading {args.model_id} to {local_source_dir} (resumable via curl.exe)...")
+        dl_rc = download_repo(repo_id=args.model_id, target_dir=local_source_dir)
+        if dl_rc != 0:
+            print("[Error] Download interrupted or failed. Re-run the exact same command to resume.")
+            return dl_rc
+
+    # Step 2: 執行 OpenVINO INT4 混合精度量化導出
+    print(f"\n[Step 2/2] Exporting and quantizing {local_source_dir} -> {out_dir} ...")
     out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = hf_cache_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["HF_HOME"] = str(hf_cache_dir)
-    env["HUGGINGFACE_HUB_CACHE"] = str(hf_cache_dir / "hub")
-    env["TMPDIR"] = str(hf_cache_dir / "tmp")
-    env["TEMP"] = str(hf_cache_dir / "tmp")
-    env["TMP"] = str(hf_cache_dir / "tmp")
-    (hf_cache_dir / "tmp").mkdir(parents=True, exist_ok=True)
+    env["TMPDIR"] = str(tmp_dir)
+    env["TEMP"] = str(tmp_dir)
+    env["TMP"] = str(tmp_dir)
 
     res = subprocess.run(cmd, env=env)
     if res.returncode == 0:
-        if args.clean_cache and hf_cache_dir.exists():
-            print(f"\n[Clean-Cache] Removing temporary 66 GB HF cache at {hf_cache_dir} ...")
-            shutil.rmtree(hf_cache_dir, ignore_errors=True)
+        if args.clean_cache and not is_local_path and local_source_dir.exists():
+            print(f"\n[Clean-Cache] Removing temporary 66 GB source files at {local_source_dir} ...")
+            shutil.rmtree(local_source_dir, ignore_errors=True)
         print("\n" + "=" * 84)
         print(f" Conversion Succeeded! OpenVINO IR saved to: {out_dir}")
         print(f" Run server: python run_server.py --model \"{out_dir.name}\"")
