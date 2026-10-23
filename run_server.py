@@ -95,6 +95,57 @@ def resolve_initial_model(model_arg: str | None) -> Path | None:
     return all_found[0]
 
 
+def resolve_sub_model(
+    sub_model_arg: str | None,
+    primary_path: Path | None,
+    auto_sub: bool = True,
+) -> Path | None:
+    """解析副引擎小模型 (用於處理 Claude Code Haiku/標題/快回請求)"""
+    search_dirs = [
+        project_root / "models",
+        project_root.parent.parent / "aio-mono" / "open-vino-llm" / "models",
+    ]
+
+    if sub_model_arg:
+        p = Path(sub_model_arg)
+        if p.exists() and is_valid_ov_model_dir(p):
+            return p.resolve()
+        for base in search_dirs:
+            cand = base / sub_model_arg
+            if cand.exists() and is_valid_ov_model_dir(cand):
+                return cand.resolve()
+            if base.exists():
+                for sub in sorted(base.iterdir()):
+                    if is_valid_ov_model_dir(sub) and sub_model_arg.lower() in sub.name.lower():
+                        return sub.resolve()
+        return None
+
+    if not auto_sub:
+        return None
+
+    # 自動在模型目錄中尋找輕量小模型 (< 2.5 GB) 作為副引擎
+    candidates: list[tuple[float, Path]] = []
+    primary_resolved = primary_path.resolve() if primary_path else None
+
+    for base in search_dirs:
+        if not base.exists():
+            continue
+        for sub in sorted(base.iterdir()):
+            if not is_valid_ov_model_dir(sub):
+                continue
+            if primary_resolved and sub.resolve() == primary_resolved:
+                continue
+            info = device_manager.inspect_model_dir(sub)
+            if info.total_weight_gb < 2.5 and not info.is_moe:
+                candidates.append((info.total_weight_gb, sub.resolve()))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OpenVINO-Strata: Low-VRAM MoE OpenAI/Anthropic-Compatible LLM Provider"
@@ -158,6 +209,31 @@ def main():
         help="閒置超過指定秒數自動卸載模型釋放顯存 (預設 0 常駐)",
     )
     parser.add_argument(
+        "--sub_model",
+        "--sub-model",
+        dest="sub_model",
+        type=str,
+        default=None,
+        help="副模型 (小模型/Fast Model) 目錄名稱或路徑，用於處理 Claude Code Haiku/標題/快回請求",
+    )
+    parser.add_argument(
+        "--sub_device",
+        "--sub-device",
+        dest="sub_device",
+        type=str,
+        default="NPU",
+        choices=["NPU", "CPU", "GPU"],
+        help="副模型運算硬體裝置 (預設 NPU，不相容時自動降級至 CPU)",
+    )
+    parser.add_argument(
+        "--auto_sub_engine",
+        "--auto-sub-engine",
+        dest="auto_sub_engine",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否在未指定 --sub-model 時自動在模型庫中挑選輕量模型 (<2.5GB) 啟用副引擎",
+    )
+    parser.add_argument(
         "--lazy_load",
         action="store_true",
         default=False,
@@ -167,12 +243,29 @@ def main():
     args = parser.parse_args()
     model_path = resolve_initial_model(args.model_dir)
 
+    # 地雷防護：檢查是否嘗試在 NPU 上運行 35B MoE 主模型
+    if args.device.upper() == "NPU":
+        inspect_res = device_manager.inspect_model_dir(model_path) if model_path else None
+        if inspect_res and (inspect_res.is_moe or "35b" in inspect_res.name.lower()):
+            raise ValueError(
+                f"裝置設定不支援：模型 [{model_path.name if model_path else 'MoE'}] 包含稀疏專家架構，"
+                "OpenVINO NPU 驅動不支援 OFFLOAD_RATIO 分層卸載機制。\n"
+                "請將主模型 --device 指定為 GPU (推薦) 或 CPU。"
+                "若需善用 NPU 算力，請使用 --sub-device NPU --sub-model 搭配小型模型 (如 0.5B/1.7B) 作為副引擎。"
+            )
+
     if model_path is None and not args.lazy_load:
         logger.warning(
             "目前在 models/ 目錄下尚未找到已下載的 OpenVINO 模型，將以 Lazy Mode 啟動服務。"
             "請執行 python scripts/download_model.py 或透過 /api/models/load 載入模型。"
         )
         args.lazy_load = True
+
+    sub_model_path = resolve_sub_model(args.sub_model, model_path, auto_sub=args.auto_sub_engine)
+    sub_ram_gb = 0.0
+    if sub_model_path:
+        sub_info = device_manager.inspect_model_dir(sub_model_path)
+        sub_ram_gb = round(sub_info.total_weight_gb + 0.5, 2)
 
     strata_cfg = StrataConfig(
         device=args.device,
@@ -183,13 +276,18 @@ def main():
         enable_mtp=args.enable_mtp,
         mtp_device=args.mtp_device,
         idle_unload_seconds=args.idle_unload_seconds,
+        sub_model_ram_budget_gb=sub_ram_gb,
     )
 
     print("=" * 72)
     print("   OpenVINO-Strata: Low-VRAM MoE LLM Provider (OpenAI & Anthropic API)")
     print("=" * 72)
-    print(f"[*] 初始模型: {model_path.name if model_path else '(Lazy Mode 待命)'}")
-    print(f"[*] 運算裝置: [{args.device}] | KV 精度: [{args.kv_cache_precision}]")
+    print(f"[*] 主模型 (Primary): {model_path.name if model_path else '(Lazy Mode 待命)'}")
+    print(f"[*] 主裝置: [{args.device}] | KV 精度: [{args.kv_cache_precision}]")
+    if sub_model_path:
+        print(f"[*] 副引擎 (Sub-Engine): {sub_model_path.name} 於 [{args.sub_device}] (預留 RAM: {sub_ram_gb} GB)")
+    else:
+        print("[*] 副引擎 (Sub-Engine): (未啟用)")
     if model_path:
         plan = device_manager.plan_strata_execution(model_path, strata_cfg)
         print(
@@ -210,6 +308,8 @@ def main():
         device=args.device,
         strata_config=strata_cfg,
         lazy_load=args.lazy_load,
+        sub_model_path=sub_model_path,
+        sub_device=args.sub_device,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

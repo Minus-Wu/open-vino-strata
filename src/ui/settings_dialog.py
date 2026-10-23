@@ -53,12 +53,20 @@ class SettingsDialog(QDialog):
         strata_layout = QFormLayout(strata_group)
 
         self.device_combo = QComboBox()
-        devices = ["GPU", "CPU", "NPU", "HETERO:GPU,CPU", "AUTO:GPU,NPU,CPU"]
+        # 35B MoE 主模型必須在 GPU (透過 OFFLOAD_RATIO 卸載) 或 CPU 執行；
+        # NPU 不支援 OFFLOAD_RATIO，AUTO 會造成重複編譯，故從主模型選單中排除
+        devices = ["GPU", "CPU", "HETERO:GPU,CPU"]
         self.device_combo.addItems(devices)
         cur_dev = self.config.get("device", "GPU")
         if cur_dev in devices:
             self.device_combo.setCurrentText(cur_dev)
-        strata_layout.addRow("推論裝置 (Device):", self.device_combo)
+        else:
+            self.device_combo.setCurrentText("GPU")
+        self.device_combo.setToolTip(
+            "35B-A3B MoE 主模型仰賴 OFFLOAD_RATIO 分層卸載，僅支援 GPU 或 CPU。\n"
+            "NPU 不支援動態專家卸載，但可作為副引擎 (Sub-Engine) 處理小模型/快回請求。"
+        )
+        strata_layout.addRow("主模型裝置 (Device):", self.device_combo)
 
         self.vram_budget_spin = QDoubleSpinBox()
         self.vram_budget_spin.setRange(0.0, 64.0)
