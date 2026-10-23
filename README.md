@@ -70,18 +70,61 @@
 .\.venv\Scripts\python.exe scripts/convert_model.py --model-id empero-ai/Qwen3.8-35B-A3B-Distill --install-deps
 ```
 
-### 3. 一鍵啟動伺服器與原生 PyQt6 桌面 AI Studio
+### 3. 啟動伺服器、桌面 Chat UI、系統匣模式與開機自動啟動安裝
 
-直接執行專案根目錄的一鍵啟動腳本：
+#### 方式 1：安裝 Windows 使用者登入後自動在背景啟動 (推薦)
+若希望電腦開機、使用者登入後自動於背景靜默啟動 OpenVINO-Strata（無獨立黑窗，直接常駐右下角系統匣）：
 ```powershell
+# 執行專案根目錄的一鍵自啟安裝腳本
+.\install_startup.bat
+
+# 或透過指令列安裝
+.\.venv\Scripts\python.exe run_tray.py --install-startup
+
+# 若未來需解除自啟動，執行：
+.\uninstall_startup.bat
+# 或
+.\.venv\Scripts\python.exe run_tray.py --uninstall-startup
+```
+> [!TIP]
+> 亦可直接在桌面 Chat UI 介面點擊「**⚙️ 設定**」勾選「**Windows 使用者登入後自動在背景啟動**」，或在系統匣右鍵選單直接切換開關。
+
+#### 方式 2：啟動 Windows 系統匣常駐模式 (手動啟動)
+```powershell
+# 一鍵啟動 Windows 系統匣模式 (背景託管 API 伺服器並常駐於右下角系統匣)
+.\start_tray.bat
+
+# 或透過指令列啟動 (可選擇是否直接最小化常駐)
+.\.venv\Scripts\python.exe run_tray.py --device GPU --port 12223
+```
+- **系統匣與日誌核心功能**：
+  - 🖱️ **單擊 / 雙擊系統匣圖示**：隨時在前景喚醒或切換顯示 Chat UI 桌面聊天室。
+  - 🗔 **背景靜默運行 (無獨立黑窗)**：後端伺服器以背景無窗程序執行，不會彈出黑色命令提示字元視窗。
+  - 📜 **Chat 介面即時日誌檢視**：在 Chat UI 頂部點擊「**📜 日誌**」（或在系統匣右鍵點選「**📜 檢視伺服器日誌**」），隨時檢視含關鍵字色彩著色、等級篩選、自動置底與外部編輯器開啟的即時運行日誌（同步記錄於 `logs/server.log`）。
+  - 🗔 **關閉視窗不中斷服務**：點擊聊天室視窗 `✕` 自動最小化隱藏至系統匣，保持背景 LLM 推論服務不中斷。
+  - 📊 **懸浮即時資訊 (Tooltip)**：游標懸停即可檢視伺服器連線狀態、當前模型、GPU 顯存佔用、Offload 比例與可用 RAM。
+  - ⚡ **右鍵功能選單**：
+    - `💬 開啟 Chat UI` / `🙈 隱藏 Chat UI`
+    - `🌐 開啟 Web API 文檔 (Swagger /docs)`
+    - `🔄 切換模型 (Switch Model)`：動態列出本地所有可用 OpenVINO 模型並一鍵切換
+    - `🧹 釋放顯存 (Unload VRAM)`：一鍵釋放 GPU VRAM 與系統 RAM
+    - `📜 檢視伺服器日誌 (Server Log)...`：開啟即時日誌視窗
+    - `⚙️ 偏好設定 (Settings)`：調整推論參數、顯存分層與開機自啟
+    - `☑️ 登入 Windows 時自動在背景啟動`：隨時切換開機登入自啟
+    - `🚪 結束 OpenVINO-Strata (Exit)`：乾淨釋放資源、終止伺服器並完全結束
+
+#### 方式 3：一鍵啟動伺服器與前景 PyQt6 桌面 AI Studio
+```powershell
+# 一鍵啟動 API 伺服器與桌面聊天室
 .\start_all.bat
 ```
-或分別啟動後端 API 伺服器與桌面介面：
+
+#### 方式 4：分別獨立啟動後端伺服器與桌面介面
 ```powershell
 # 啟動 API Server (指定顯存預算為 8.0 GB，Strata 將自動配置 OFFLOAD_RATIO=85%)
 .\.venv\Scripts\python.exe run_server.py --device GPU --vram-budget 8.0 --port 12223
 
-# 啟動 PyQt6 桌面聊天室
+# 啟動 PyQt6 桌面聊天室 (預設整合系統匣支援)
 .\.venv\Scripts\python.exe run_gui.py --url http://127.0.0.1:12223
 ```
 
@@ -114,4 +157,10 @@
 
 # 3. 執行吞吐量與不同 OFFLOAD_RATIO 對比基準測試
 .\.venv\Scripts\python.exe scripts/benchmark.py --sweep-offload 0,35,55,85 --max-tokens 64
+
+# 4. 執行 Windows 系統匣常駐模式完整功能驗證
+.\.venv\Scripts\python.exe scripts/test_tray.py
+
+# 5. 執行視窗記憶與跨螢幕邊界安全還原驗證
+.\.venv\Scripts\python.exe scripts/test_window_restore.py
 ```
