@@ -18,6 +18,9 @@
 5. **雙重 API 相容 + PolyStrata 動態顯存生命週期**
    - 完整相容 **OpenAI API** (`/v1/chat/completions`, `/v1/completions`, `/v1/models`) 與 **Anthropic Messages API** (`/v1/messages`，可直接對接 **Claude Code** / **Cursor** / **Cline**)。
    - 提供 `/api/models/load`、`/api/models/unload` 與 `/api/strata/plan`，支援無縫熱切換模型與一鍵釋放顯存。
+6. **雙引擎協同分流 (Dual-Engine NPU/CPU Fast Channel)**
+   - 針對 Claude Code / 外部工具發送的高頻輕量請求（如 `claude-3-5-haiku`、標題命名、摘要、語法前綴檢查），支援配置第二個副引擎（載入於 NPU 或 CPU）。
+   - 主副引擎具備獨立推論通道與非同步鎖，請求互不爭搶排隊，主模型生成長回答的同時副引擎可即時平行回應。
 
 ---
 
