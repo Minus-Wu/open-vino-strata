@@ -49,6 +49,15 @@ def test_strata_memory_planner():
         "models/Qwen3.8-35B-A3B-int4-ov", StrataConfig(vram_budget_gb=14.5)
     )
     assert plan_8g.recommended_offload_ratio > plan_14g.recommended_offload_ratio
+
+    # 驗證副模型 RAM 預留功能
+    plan_with_sub = device_manager.plan_strata_execution(
+        "models/Qwen3.8-35B-A3B-int4-ov",
+        StrataConfig(vram_budget_gb=8.0, sub_model_ram_budget_gb=2.0),
+    )
+    assert plan_with_sub.sub_model_ram_budget_gb == 2.0
+    assert plan_with_sub.estimated_ram_offload_gb >= plan_8g.estimated_ram_offload_gb + 1.9
+    print(f"  - 副模型預留 2.0 GB RAM 後預計系統 RAM 總用量: {plan_with_sub.estimated_ram_offload_gb} GB")
     print("[V] StrataMemoryPlanner 測試通過！\n")
 
 

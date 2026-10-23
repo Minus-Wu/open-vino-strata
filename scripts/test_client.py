@@ -44,11 +44,14 @@ def main() -> int:
         vram_budget_gb=12.0,
         kv_cache_precision="u8",
         enable_mtp=False,
+        sub_model_ram_budget_gb=1.0,
     )
     app = create_app(
         model_path=model_dir,
         device="GPU",
         strata_config=strata_cfg,
+        sub_model_path=model_dir,
+        sub_device="CPU",
     )
 
     with TestClient(app) as client:
@@ -184,6 +187,34 @@ def main() -> int:
         load_data = res.json()
         assert load_data["status"] == "loaded"
         print(f"  Reloaded model: {load_data['model']} on {load_data['device']}")
+
+        # 8. Dual-Engine & Model Routing (Haiku / Fast Model -> Sub-Engine)
+        print("\n[8/8] Testing Dual-Engine Routing (Fast/Haiku Model -> Sub-Engine) ...")
+        # Check health reports sub_engine
+        h_res = client.get("/health").json()
+        assert "sub_engine" in h_res, h_res
+        assert h_res["sub_engine"]["loaded"] is True
+        print(f"  Health check reports sub-engine: {h_res['sub_engine']}")
+
+        # Send haiku request to /v1/messages
+        haiku_msg = {
+            "model": "claude-3-5-haiku-20241022",
+            "messages": [{"role": "user", "content": "Ping"}],
+            "max_tokens": 10,
+        }
+        res_haiku = client.post("/v1/messages", json=haiku_msg)
+        assert res_haiku.status_code == 200, res_haiku.text
+        print(f"  Sub-engine /v1/messages Response: {res_haiku.json()['content'][0]['text']!r}")
+
+        # Send haiku request to /v1/chat/completions
+        haiku_chat = {
+            "model": "haiku",
+            "messages": [{"role": "user", "content": "Ping"}],
+            "max_tokens": 10,
+        }
+        res_chat = client.post("/v1/chat/completions", json=haiku_chat)
+        assert res_chat.status_code == 200, res_chat.text
+        print(f"  Sub-engine /v1/chat/completions Response: {res_chat.json()['choices'][0]['message']['content']!r}")
 
     print("\n" + "=" * 72)
     print(" ALL STAGE 2 SERVER TESTS PASSED SUCCESSFULLY!")
