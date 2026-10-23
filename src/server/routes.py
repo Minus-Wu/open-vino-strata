@@ -143,6 +143,30 @@ async def list_models(engine: OVStrataEngine = Depends(get_engine)):
 # PolyStrata 風格動態模型與顯存分層管理 API (/api/models/* & /api/strata/*)
 # =====================================================================
 
+@router.get("/api/server/logs")
+async def api_get_server_logs(tail: int = 300):
+    """讀取伺服器最新日誌 (供 Chat 介面或監控工具檢視)"""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    log_path = project_root / "logs" / "server.log"
+    if not log_path.exists():
+        return {
+            "lines": ["(日誌檔案尚未產生或伺服器正在啟動中)"],
+            "total_lines": 0,
+            "file_size_bytes": 0,
+        }
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+            tail_lines = all_lines[-tail:] if len(all_lines) > tail else all_lines
+            return {
+                "lines": [line.rstrip("\r\n") for line in tail_lines],
+                "total_lines": len(all_lines),
+                "file_size_bytes": log_path.stat().st_size,
+            }
+    except Exception as e:
+        return {"lines": [f"讀取日誌失敗: {e}"], "total_lines": 0, "file_size_bytes": 0}
+
+
 @router.get("/api/models")
 async def api_list_models(engine: OVStrataEngine = Depends(get_engine)):
     return {

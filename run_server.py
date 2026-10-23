@@ -23,10 +23,32 @@ from src.engine.device_manager import device_manager, StrataConfig
 from src.engine.ov_strata_engine import is_valid_ov_model_dir
 from src.server.app import create_app
 
+import logging.handlers
+
+logs_dir = project_root / "logs"
+logs_dir.mkdir(parents=True, exist_ok=True)
+server_log_file = logs_dir / "server.log"
+
+log_file_handler = logging.handlers.RotatingFileHandler(
+    server_log_file,
+    maxBytes=20 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
+)
+log_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        log_file_handler,
+    ],
 )
+logging.getLogger("uvicorn").addHandler(log_file_handler)
+logging.getLogger("uvicorn.access").addHandler(log_file_handler)
 logger = logging.getLogger("ov_strata")
 
 
