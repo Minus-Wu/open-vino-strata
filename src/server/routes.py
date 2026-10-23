@@ -42,6 +42,7 @@ logger = logging.getLogger("ov_strata.routes")
 router = APIRouter()
 
 _engine: Optional[OVStrataEngine] = None
+_sub_engine: Optional[OVStrataEngine] = None
 
 
 def get_engine() -> OVStrataEngine:
@@ -53,6 +54,62 @@ def get_engine() -> OVStrataEngine:
 def set_engine(engine: OVStrataEngine):
     global _engine
     _engine = engine
+
+
+def get_sub_engine() -> Optional[OVStrataEngine]:
+    return _sub_engine
+
+
+def set_sub_engine(sub_engine: Optional[OVStrataEngine]):
+    global _sub_engine
+    _sub_engine = sub_engine
+
+
+def resolve_engine_for_model(requested_model: Optional[str] = None) -> tuple[OVStrataEngine, bool]:
+    """
+    根據請求的模型名稱決定分流目標引擎。
+    回傳: (選定引擎, 是否為副引擎)
+
+    分流規則：
+    1. 若未載入副引擎，一律使用主引擎。
+    2. 若請求模型符合下列特徵，優先路由至副引擎 (NPU / CPU 副模型)：
+       - 包含 'haiku' (Claude Code / Anthropic fast 模型)
+       - 包含 'small', 'fast', 'mini', 'flash'
+       - 精確匹配副引擎的 model_name 或路徑名稱
+    3. 若明確要求 35b / sonnet / opus 或主模型名稱，一律走主引擎。
+    """
+    primary = get_engine()
+    if _sub_engine is None or not _sub_engine.is_loaded:
+        return primary, False
+
+    if not requested_model:
+        return primary, False
+
+    m_lower = requested_model.strip().lower()
+
+    # 明確指名主模型名稱或 35b / sonnet / opus 時強制主引擎
+    if (
+        "35b" in m_lower
+        or "sonnet" in m_lower
+        or "opus" in m_lower
+        or m_lower == primary.model_name.lower()
+    ):
+        return primary, False
+
+    is_fast_model = (
+        "haiku" in m_lower
+        or "small" in m_lower
+        or "fast" in m_lower
+        or "mini" in m_lower
+        or "flash" in m_lower
+        or m_lower == _sub_engine.model_name.lower()
+        or (_sub_engine.model_path and m_lower == _sub_engine.model_path.name.lower())
+    )
+
+    if is_fast_model:
+        return _sub_engine, True
+
+    return primary, False
 
 
 def _resolve_thinking_flag(request: ChatCompletionRequest) -> Optional[bool]:
@@ -92,7 +149,7 @@ def _build_usage_info(metrics: EngineMetrics, reasoning_tokens: int = 0) -> Usag
 async def health_check(engine: OVStrataEngine = Depends(get_engine)):
     info = engine.get_info()
     plan = info.get("strata_plan") or {}
-    return {
+    resp = {
         "status": "healthy",
         "model": engine.model_name,
         "loaded": engine.is_loaded,
@@ -103,6 +160,13 @@ async def health_check(engine: OVStrataEngine = Depends(get_engine)):
         "gpu_memory": info.get("gpu_memory", {}),
         "system_memory": info.get("system_memory", {}),
     }
+    if _sub_engine is not None and _sub_engine.is_loaded:
+        resp["sub_engine"] = {
+            "model": _sub_engine.model_name,
+            "device": _sub_engine.current_device,
+            "loaded": _sub_engine.is_loaded,
+        }
+    return resp
 
 
 @router.get("/v1/models", response_model=ModelList)
@@ -112,22 +176,37 @@ async def list_models(engine: OVStrataEngine = Depends(get_engine)):
     cards: List[ModelCard] = []
 
     for m in discovered:
+        is_sub = bool(_sub_engine and _sub_engine.is_loaded and m["id"] == _sub_engine.model_name)
+        active_dev = _sub_engine.current_device if is_sub else (engine.current_device if m["current"] else None)
         cards.append(
             ModelCard(
                 id=m["id"],
-                device=engine.current_device if m["current"] else None,
-                loaded=m["status"] == "loaded",
-                offload_ratio=m["recommended_offload_ratio"],
-                estimated_vram_gb=m["estimated_vram_gb"],
-                device_info=dev_info if m["current"] else None,
+                device=active_dev,
+                loaded=m["status"] == "loaded" or is_sub,
+                offload_ratio=0 if is_sub else m["recommended_offload_ratio"],
+                estimated_vram_gb=0.0 if is_sub else m["estimated_vram_gb"],
+                device_info=device_manager.get_device_info(active_dev) if active_dev else None,
             )
         )
 
-    if not cards and engine.model_name:
+    # 虛擬 Claude Code / Anthropic 相容別名，方便客戶端免設定映射
+    if _sub_engine and _sub_engine.is_loaded:
+        sub_dev_info = device_manager.get_device_info(_sub_engine.current_device)
+        cards.append(
+            ModelCard(
+                id="claude-3-5-haiku-20241022",
+                device=_sub_engine.current_device,
+                loaded=True,
+                offload_ratio=0,
+                estimated_vram_gb=0.0,
+                device_info=sub_dev_info,
+            )
+        )
+    if engine.model_name:
         plan = engine.current_plan
         cards.append(
             ModelCard(
-                id=engine.model_name,
+                id="claude-3-7-sonnet-20250219",
                 device=engine.current_device,
                 loaded=engine.is_loaded,
                 offload_ratio=plan.recommended_offload_ratio if plan else 0,
@@ -169,12 +248,19 @@ async def api_get_server_logs(tail: int = 300):
 
 @router.get("/api/models")
 async def api_list_models(engine: OVStrataEngine = Depends(get_engine)):
-    return {
+    res = {
         "current": engine.model_name if engine.is_loaded else None,
         "loaded": engine.is_loaded,
         "device": engine.current_device,
         "models": engine.discover_available_models(),
     }
+    if _sub_engine is not None and _sub_engine.is_loaded:
+        res["sub_engine"] = {
+            "model": _sub_engine.model_name,
+            "device": _sub_engine.current_device,
+            "loaded": _sub_engine.is_loaded,
+        }
+    return res
 
 
 @router.get("/api/models/current")
@@ -235,25 +321,39 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     engine: OVStrataEngine = Depends(get_engine),
 ):
-    # 若請求指定了特定本地模型且與目前載入模型不同，支援自動熱切換
+    target_engine, is_sub = resolve_engine_for_model(request.model)
+
+    # 若非副引擎且請求指定了特定本地模型，支援主引擎自動熱切換
     if (
-        request.model
-        and request.model not in ("default", "auto", engine.model_name)
+        not is_sub
+        and request.model
+        and request.model not in ("default", "auto", target_engine.model_name)
     ):
         try:
-            target_path = engine.resolve_model_path(request.model)
-            if engine.model_path is None or target_path != engine.model_path.resolve():
-                await engine.switch_model(target_path)
+            target_path = target_engine.resolve_model_path(request.model)
+            if target_engine.model_path is None or target_path != target_engine.model_path.resolve():
+                await target_engine.switch_model(target_path)
         except FileNotFoundError:
-            # 若客戶端傳入如 "gpt-4o" 等外部別名，直接使用目前模型回應
+            # 若客戶端傳入外部別名，直接使用目前模型回應
             pass
+
+    if is_sub:
+        logger.info(
+            f"Routing chat completion [model='{request.model}'] -> SUB-ENGINE "
+            f"[{target_engine.current_device}: {target_engine.model_name}]"
+        )
+    else:
+        logger.info(
+            f"Routing chat completion [model='{request.model}'] -> PRIMARY "
+            f"[{target_engine.current_device}: {target_engine.model_name}]"
+        )
 
     req_id = f"chatcmpl-{uuid.uuid4().hex}"
     raw_messages = [msg.model_dump() for msg in request.messages]
     enable_thinking = _resolve_thinking_flag(request)
 
     try:
-        prompt, prompt_opened_think, image_tensors = engine.format_chat_prompt(
+        prompt, prompt_opened_think, image_tensors = target_engine.format_chat_prompt(
             raw_messages,
             tools=request.tools,
             enable_thinking=enable_thinking,
@@ -270,7 +370,7 @@ async def create_chat_completion(
         async def event_generator() -> AsyncGenerator[str, None]:
             first_chunk = ChatCompletionChunk(
                 id=req_id,
-                model=engine.model_name,
+                model=target_engine.model_name,
                 choices=[
                     ChatCompletionChunkChoice(
                         index=0,
@@ -290,7 +390,7 @@ async def create_chat_completion(
             reasoning_acc: List[str] = []
             emitted_tool_calls = False
 
-            async for token_text, metrics in engine.generate_stream(
+            async for token_text, metrics in target_engine.generate_stream(
                 prompt=prompt,
                 max_new_tokens=request.max_tokens or 1024,
                 temperature=temp,
@@ -308,7 +408,7 @@ async def create_chat_completion(
                             reasoning_acc.append(d.reasoning_content)
                             chunk = ChatCompletionChunk(
                                 id=req_id,
-                                model=engine.model_name,
+                                model=target_engine.model_name,
                                 choices=[
                                     ChatCompletionChunkChoice(
                                         index=0,
@@ -321,7 +421,7 @@ async def create_chat_completion(
                         if d.content:
                             chunk = ChatCompletionChunk(
                                 id=req_id,
-                                model=engine.model_name,
+                                model=target_engine.model_name,
                                 choices=[
                                     ChatCompletionChunkChoice(
                                         index=0,
@@ -336,7 +436,7 @@ async def create_chat_completion(
                             tc_dicts = [tc.to_openai_dict(i) for i, tc in enumerate(d.tool_calls)]
                             chunk = ChatCompletionChunk(
                                 id=req_id,
-                                model=engine.model_name,
+                                model=target_engine.model_name,
                                 choices=[
                                     ChatCompletionChunkChoice(
                                         index=0,
@@ -356,7 +456,7 @@ async def create_chat_completion(
                     reasoning_acc.append(d.reasoning_content)
                     chunk = ChatCompletionChunk(
                         id=req_id,
-                        model=engine.model_name,
+                        model=target_engine.model_name,
                         choices=[
                             ChatCompletionChunkChoice(
                                 index=0,
@@ -369,7 +469,7 @@ async def create_chat_completion(
                 if d.content:
                     chunk = ChatCompletionChunk(
                         id=req_id,
-                        model=engine.model_name,
+                        model=target_engine.model_name,
                         choices=[
                             ChatCompletionChunkChoice(
                                 index=0,
@@ -384,7 +484,7 @@ async def create_chat_completion(
                     tc_dicts = [tc.to_openai_dict(i) for i, tc in enumerate(d.tool_calls)]
                     chunk = ChatCompletionChunk(
                         id=req_id,
-                        model=engine.model_name,
+                        model=target_engine.model_name,
                         choices=[
                             ChatCompletionChunkChoice(
                                 index=0,
@@ -397,14 +497,14 @@ async def create_chat_completion(
 
             usage_info = None
             if final_metrics:
-                r_toks = engine.count_tokens("".join(reasoning_acc)) if reasoning_acc else 0
+                r_toks = target_engine.count_tokens("".join(reasoning_acc)) if reasoning_acc else 0
                 final_metrics.reasoning_tokens = r_toks
                 usage_info = _build_usage_info(final_metrics, reasoning_tokens=r_toks)
 
             finish_reason = "tool_calls" if emitted_tool_calls else "stop"
             stop_chunk = ChatCompletionChunk(
                 id=req_id,
-                model=engine.model_name,
+                model=target_engine.model_name,
                 choices=[
                     ChatCompletionChunkChoice(
                         index=0,
@@ -429,7 +529,7 @@ async def create_chat_completion(
 
     # 2. 同步完整生成模式 (Non-streaming)
     try:
-        output_text, metrics = await engine.generate(
+        output_text, metrics = await target_engine.generate(
             prompt=prompt,
             max_new_tokens=request.max_tokens or 1024,
             temperature=temp,
@@ -445,7 +545,7 @@ async def create_chat_completion(
         raise HTTPException(status_code=500, detail=f"Inference engine error: {e}")
 
     parsed = parse_full_output(output_text, prompt_opened_think=prompt_opened_think)
-    r_tokens = engine.count_tokens(parsed.reasoning_content) if parsed.reasoning_content else 0
+    r_tokens = target_engine.count_tokens(parsed.reasoning_content) if parsed.reasoning_content else 0
     metrics.reasoning_tokens = r_tokens
 
     tc_list = [tc.to_openai_dict(i) for i, tc in enumerate(parsed.tool_calls)] if parsed.tool_calls else None
@@ -458,7 +558,7 @@ async def create_chat_completion(
 
     return ChatCompletionResponse(
         id=req_id,
-        model=engine.model_name,
+        model=target_engine.model_name,
         choices=[
             ChatCompletionChoice(
                 index=0,
@@ -475,12 +575,13 @@ async def create_completion(
     request: CompletionRequest,
     engine: OVStrataEngine = Depends(get_engine),
 ):
+    target_engine, is_sub = resolve_engine_for_model(request.model)
     req_id = f"cmpl-{uuid.uuid4().hex}"
     prompt_str = request.prompt if isinstance(request.prompt, str) else "\n".join(request.prompt)
     stop_strings = [request.stop] if isinstance(request.stop, str) else request.stop
     temp = request.temperature if request.temperature is not None else 0.7
 
-    output_text, metrics = await engine.generate(
+    output_text, metrics = await target_engine.generate(
         prompt=prompt_str,
         max_new_tokens=request.max_tokens or 512,
         temperature=temp,
@@ -493,7 +594,7 @@ async def create_completion(
     return {
         "id": req_id,
         "object": "text_completion",
-        "model": engine.model_name,
+        "model": target_engine.model_name,
         "choices": [
             {
                 "index": 0,
@@ -514,6 +615,18 @@ async def create_anthropic_message(
     request: AnthropicMessageRequest,
     engine: OVStrataEngine = Depends(get_engine),
 ):
+    target_engine, is_sub = resolve_engine_for_model(request.model)
+    if is_sub:
+        logger.info(
+            f"Routing Anthropic message [model='{request.model}'] -> SUB-ENGINE "
+            f"[{target_engine.current_device}: {target_engine.model_name}]"
+        )
+    else:
+        logger.info(
+            f"Routing Anthropic message [model='{request.model}'] -> PRIMARY "
+            f"[{target_engine.current_device}: {target_engine.model_name}]"
+        )
+
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     converted_messages: List[Dict[str, Any]] = []
 
@@ -538,7 +651,7 @@ async def create_anthropic_message(
         elif t_type == "disabled":
             enable_thinking = False
 
-    prompt, prompt_opened_think, image_tensors = engine.format_chat_prompt(
+    prompt, prompt_opened_think, image_tensors = target_engine.format_chat_prompt(
         converted_messages,
         tools=request.tools,
         enable_thinking=enable_thinking,
@@ -555,11 +668,11 @@ async def create_anthropic_message(
                     "id": msg_id,
                     "type": "message",
                     "role": "assistant",
-                    "model": engine.model_name,
+                    "model": target_engine.model_name,
                     "content": [],
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": engine.count_tokens(prompt), "output_tokens": 0},
+                    "usage": {"input_tokens": target_engine.count_tokens(prompt), "output_tokens": 0},
                 },
             }
             yield f"event: message_start\ndata: {json.dumps(start_evt, ensure_ascii=False)}\n\n"
@@ -579,7 +692,7 @@ async def create_anthropic_message(
             final_metrics: Optional[EngineMetrics] = None
             emitted_tools: List[Any] = []
 
-            async for token_text, metrics in engine.generate_stream(
+            async for token_text, metrics in target_engine.generate_stream(
                 prompt=prompt,
                 max_new_tokens=request.max_tokens,
                 temperature=temp,
@@ -649,7 +762,7 @@ async def create_anthropic_message(
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
-    output_text, metrics = await engine.generate(
+    output_text, metrics = await target_engine.generate(
         prompt=prompt,
         max_new_tokens=request.max_tokens,
         temperature=temp,
@@ -674,7 +787,7 @@ async def create_anthropic_message(
         "id": msg_id,
         "type": "message",
         "role": "assistant",
-        "model": engine.model_name,
+        "model": target_engine.model_name,
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": None,
