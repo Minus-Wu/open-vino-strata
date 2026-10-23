@@ -50,6 +50,8 @@ class StrataConfig:
     idle_unload_seconds: int = 0
     # 是否啟用編譯快取 (.ov_cache) 加速二次啟動
     enable_compile_cache: bool = True
+    # 副引擎 (NPU/CPU Fast Model) 預留的系統 RAM 預算 (GB)，避免 MoE 專家卸載佔滿記憶體
+    sub_model_ram_budget_gb: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -101,6 +103,7 @@ class StrataPlan:
     use_mtp: bool
     mtp_device: str
     use_prefix_caching: bool
+    sub_model_ram_budget_gb: float = 0.0 # 預留給副引擎 (NPU/CPU) 的記憶體量 (GB)
     ov_plugin_config: Dict[str, Any] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
 
@@ -445,20 +448,24 @@ class DeviceManager:
                 recommended_offload = 0
 
         # 估算最終顯存與系統記憶體使用量
+        sub_ram_gb = max(0.0, float(cfg.sub_model_ram_budget_gb or 0.0))
         if "GPU" in target_dev:
             if model_info.is_moe:
                 experts_in_vram = model_info.estimated_routed_experts_gb * (1.0 - recommended_offload / 100.0)
                 experts_in_ram = model_info.estimated_routed_experts_gb * (recommended_offload / 100.0)
                 est_vram = round(model_info.estimated_dense_gb + experts_in_vram + kv_budget_gb + scratch_gb, 2)
-                est_ram = round(experts_in_ram + (model_info.mtp_weight_gb if cfg.enable_mtp else 0.0) + 1.5, 2)
+                est_ram = round(experts_in_ram + (model_info.mtp_weight_gb if cfg.enable_mtp else 0.0) + sub_ram_gb + 1.5, 2)
             else:
                 w_vram = model_info.total_weight_gb * (1.0 - recommended_offload / 100.0)
                 w_ram = model_info.total_weight_gb * (recommended_offload / 100.0)
                 est_vram = round(w_vram + kv_budget_gb + scratch_gb, 2)
-                est_ram = round(w_ram + 1.0, 2)
+                est_ram = round(w_ram + sub_ram_gb + 1.0, 2)
         else:
             est_vram = 0.0
-            est_ram = round(model_info.total_weight_gb + kv_budget_gb + 1.5, 2)
+            est_ram = round(model_info.total_weight_gb + kv_budget_gb + sub_ram_gb + 1.5, 2)
+
+        if sub_ram_gb > 0:
+            notes.append(f"已保留副引擎 (NPU/CPU 副模型) 記憶體預算 {sub_ram_gb:.2f} GB，以維護系統 RAM 總體安全。")
 
         # MTP 與 Prefix Caching 協調規則 (OpenVINO GenAI 規範: 啟用 MTP 時需關閉 Prefix Caching)
         use_mtp = bool(cfg.enable_mtp and model_info.has_mtp)
@@ -480,13 +487,14 @@ class DeviceManager:
                         ov_plugin_config["WEIGHTS_PATH"] = str(bin_candidate.resolve())
                         break
 
+        effective_ram_avail = max(0.5, round(sys_mem["available_ram_gb"] - sub_ram_gb, 2))
         return StrataPlan(
             model_info=model_info,
             target_device=target_dev,
             vram_total_gb=vram_total_gb,
             vram_budget_gb=vram_budget_gb,
             ram_total_gb=sys_mem["total_ram_gb"],
-            ram_available_gb=sys_mem["available_ram_gb"],
+            ram_available_gb=effective_ram_avail,
             recommended_offload_ratio=recommended_offload,
             kv_cache_precision=cfg.kv_cache_precision,
             kv_cache_budget_gb=kv_budget_gb,
@@ -497,6 +505,7 @@ class DeviceManager:
             use_mtp=use_mtp,
             mtp_device=cfg.mtp_device.upper(),
             use_prefix_caching=use_prefix_caching,
+            sub_model_ram_budget_gb=sub_ram_gb,
             ov_plugin_config=ov_plugin_config,
             notes=notes,
         )
