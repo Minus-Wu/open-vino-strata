@@ -63,8 +63,12 @@ def resolve_initial_model(model_arg: str | None) -> Path | None:
     if not all_found:
         return None
 
+    # 優先選擇 Qwen3.8-35B-A3B，其次為 Qwen3.6 / 其他 35B-A3B 模型
     for m in all_found:
-        if "35b-a3b" in m.name.lower() or "qwen3.8" in m.name.lower() or "qwen3.6" in m.name.lower():
+        if "qwen3.8" in m.name.lower():
+            return m
+    for m in all_found:
+        if "35b-a3b" in m.name.lower() or "qwen3.6" in m.name.lower():
             return m
     return all_found[0]
 

@@ -93,6 +93,10 @@ class OVStrataEngine:
         self.strata_config = strata_config or StrataConfig(device=device.upper())
         if device:
             self.strata_config.device = device.upper()
+        if "offload_ratio" in pipeline_kwargs:
+            self.strata_config.offload_ratio = pipeline_kwargs.pop("offload_ratio")
+        if "vram_budget_gb" in pipeline_kwargs:
+            self.strata_config.vram_budget_gb = pipeline_kwargs.pop("vram_budget_gb")
 
         self.pipeline_kwargs = pipeline_kwargs
         self.project_root = Path(__file__).resolve().parent.parent.parent
