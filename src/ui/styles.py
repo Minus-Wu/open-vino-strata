@@ -261,4 +261,43 @@ QScrollBar::handle:vertical:hover {
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0px;
 }
+
+/* 系統匣與快顯選單 (QMenu) */
+QMenu {
+    background-color: #1A1D24;
+    border: 1px solid #282D37;
+    border-radius: 8px;
+    padding: 6px 4px;
+    color: #E2E8F0;
+    font-size: 13px;
+}
+
+QMenu::item {
+    background-color: transparent;
+    padding: 6px 22px 6px 14px;
+    border-radius: 5px;
+    margin: 1px 4px;
+}
+
+QMenu::item:selected {
+    background-color: #2563EB;
+    color: #FFFFFF;
+}
+
+QMenu::item:disabled {
+    color: #64748B;
+    background-color: transparent;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #282D37;
+    margin: 5px 8px;
+}
+
+QMenu::indicator {
+    width: 14px;
+    height: 14px;
+    margin-left: 4px;
+}
 """

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -25,12 +26,14 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QMessageBox,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QRect
+from PyQt6.QtGui import QKeyEvent, QGuiApplication
 
 from src.ui.chat_widget import ChatHistoryWidget, MessageBubble
 from src.ui.api_worker import ChatStreamWorker, HealthCheckWorker, ModelControlWorker
 from src.ui.settings_dialog import SettingsDialog
+from src.ui.server_log_dialog import ServerLogDialog
+from src.ui.tray_manager import StrataTrayManager, get_app_icon
 
 
 class ChatInputBox(QPlainTextEdit):
@@ -56,11 +59,20 @@ class ChatInputBox(QPlainTextEdit):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, base_url: str = "http://127.0.0.1:12223"):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:12223",
+        enable_tray: bool = True,
+        minimize_on_close: bool = True,
+    ):
         super().__init__()
         self.setWindowTitle("OpenVINO-Strata — Low-VRAM 35B-A3B MoE AI Studio")
         self.resize(1120, 780)
         self.setMinimumSize(820, 560)
+        self.setWindowIcon(get_app_icon())
+
+        self.minimize_to_tray_on_close = minimize_on_close
+        self.tray_manager: Optional[StrataTrayManager] = None
 
         self.config: Dict[str, Any] = {
             "base_url": base_url,
@@ -73,6 +85,7 @@ class MainWindow(QMainWindow):
             "offload_ratio": -1,
             "kv_cache_precision": "u8",
             "enable_mtp": True,
+            "minimize_to_tray": minimize_on_close,
         }
 
         self.messages: List[Dict[str, Any]] = []
@@ -84,6 +97,18 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_health_timer()
+        self._restore_window_state()
+
+        if enable_tray:
+            app = QApplication.instance()
+            if app:
+                self.tray_manager = StrataTrayManager(
+                    app=app,
+                    window=self,
+                    base_url=self.config["base_url"],
+                    minimize_on_close=self.minimize_to_tray_on_close,
+                    parent=self,
+                )
 
     def _setup_ui(self):
         central = QWidget(self)
@@ -139,6 +164,13 @@ class MainWindow(QMainWindow):
         clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_btn.clicked.connect(self._on_clear_chat)
         header_layout.addWidget(clear_btn)
+
+        self.log_btn = QPushButton("📜 日誌")
+        self.log_btn.setObjectName("SecondaryBtn")
+        self.log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.log_btn.setToolTip("檢視後端推論伺服器即時運行日誌 (Server Log)")
+        self.log_btn.clicked.connect(self._on_open_server_log)
+        header_layout.addWidget(self.log_btn)
 
         settings_btn = QPushButton("⚙️ 設定")
         settings_btn.setObjectName("SecondaryBtn")
@@ -282,6 +314,9 @@ class MainWindow(QMainWindow):
 
         self.status_badge.style().unpolish(self.status_badge)
         self.status_badge.style().polish(self.status_badge)
+
+        if self.tray_manager:
+            self.tray_manager._on_health_updated(is_online, data)
 
     def _on_load_selected_model(self):
         target_model = self.model_combo.currentText().strip()
@@ -463,12 +498,171 @@ class MainWindow(QMainWindow):
         self.messages.clear()
         self.chat_history.clear_history()
 
+    def _on_open_server_log(self):
+        """開啟後端伺服器即時日誌檢視視窗"""
+        if not hasattr(self, "_log_dialog") or self._log_dialog is None:
+            self._log_dialog = ServerLogDialog(base_url=self.config["base_url"], parent=self)
+        self._log_dialog.show()
+        self._log_dialog.raise_()
+        self._log_dialog.activateWindow()
+
     def _on_open_settings(self):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec():
             updated = dialog.get_updated_config()
             apply_now = updated.pop("apply_strata_on_save", False)
+            if "minimize_to_tray" in updated:
+                self.minimize_to_tray_on_close = updated["minimize_to_tray"]
+                if self.tray_manager:
+                    self.tray_manager.minimize_on_close = self.minimize_to_tray_on_close
+                    self.tray_manager.action_minimize_toggle.setChecked(self.minimize_to_tray_on_close)
+            if "autostart_on_login" in updated:
+                from src.utils.autostart import set_autostart, is_autostart_enabled
+                if updated["autostart_on_login"] != is_autostart_enabled():
+                    set_autostart(updated["autostart_on_login"])
             self.config.update(updated)
             self._check_health()
             if apply_now:
                 self._on_load_selected_model()
+
+    def _save_window_state(self):
+        """儲存上次關閉或隱藏時的視窗幾何座標、尺寸與最大化狀態"""
+        if not self.property("_has_been_shown"):
+            return
+
+        is_max = self.isMaximized()
+        is_min = self.isMinimized()
+
+        if is_max or is_min:
+            normal_rect = self.normalGeometry()
+            if normal_rect.isValid() and normal_rect.width() >= self.minimumWidth():
+                rect = normal_rect
+            else:
+                rect = self.geometry()
+        else:
+            rect = self.geometry()
+
+        if rect.width() < self.minimumWidth() or rect.height() < self.minimumHeight():
+            return
+
+        settings = QSettings("OpenVINO-Strata", "AIStudio")
+        settings.setValue("window/x", rect.x())
+        settings.setValue("window/y", rect.y())
+        settings.setValue("window/width", rect.width())
+        settings.setValue("window/height", rect.height())
+        settings.setValue("window/maximized", is_max)
+        settings.setValue("window/has_saved_state", True)
+        settings.sync()
+
+    def _is_rect_visible_on_screens(self, target_rect: QRect, screens_list) -> bool:
+        """檢查視窗矩形是否安全落在目前連接的任一螢幕可用區域內，且頂部標題列可正常操作"""
+        if not screens_list or not target_rect.isValid():
+            return False
+
+        min_visible_w = 200
+        min_visible_h = 100
+
+        for s in screens_list:
+            s_avail = s.availableGeometry()
+            inter = target_rect.intersected(s_avail)
+            # 至少有 200x100 的視窗主體落在該螢幕可用區域內
+            if inter.width() >= min_visible_w and inter.height() >= min_visible_h:
+                # 檢查視窗頂端標題列 (前 35px) 是否有至少 100px 寬與 15px 高在螢幕內供使用者拖曳抓取
+                title_rect = QRect(
+                    target_rect.x(), target_rect.y(),
+                    target_rect.width(), min(35, target_rect.height())
+                )
+                title_inter = title_rect.intersected(s_avail)
+                if title_inter.width() >= 100 and title_inter.height() >= 15:
+                    return True
+        return False
+
+    def _place_on_first_screen(self, first_screen, preferred_w: int, preferred_h: int, is_max: bool):
+        """將視窗安全置中於第一個螢幕 (Screen 0 / 主螢幕)"""
+        screens = QGuiApplication.screens()
+        if not first_screen:
+            first_screen = screens[0] if screens else QGuiApplication.primaryScreen()
+        if not first_screen:
+            return
+
+        avail = first_screen.availableGeometry()
+        w = min(preferred_w, avail.width() - 40)
+        w = max(self.minimumWidth(), w)
+        h = min(preferred_h, avail.height() - 40)
+        h = max(self.minimumHeight(), h)
+
+        x = avail.x() + (avail.width() - w) // 2
+        y = avail.y() + (avail.height() - h) // 2
+        self.setGeometry(QRect(x, y, w, h))
+
+        if is_max:
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+
+    def _restore_window_state(self):
+        """啟動時還原上次關閉時的位置；若超出顯示區域 (如拔除外接螢幕)，則自動顯示在第一個螢幕"""
+        screens = QGuiApplication.screens()
+        first_screen = screens[0] if screens else QGuiApplication.primaryScreen()
+
+        settings = QSettings("OpenVINO-Strata", "AIStudio")
+        has_saved = settings.value("window/has_saved_state", False, type=bool)
+
+        if not has_saved:
+            # 初次啟動：預設置中於第一個螢幕
+            self._place_on_first_screen(first_screen, 1120, 780, is_max=False)
+            return
+
+        saved_x = settings.value("window/x", type=int)
+        saved_y = settings.value("window/y", type=int)
+        saved_w = settings.value("window/width", 1120, type=int)
+        saved_h = settings.value("window/height", 780, type=int)
+        is_max = settings.value("window/maximized", False, type=bool)
+
+        saved_w = max(self.minimumWidth(), saved_w)
+        saved_h = max(self.minimumHeight(), saved_h)
+        target_rect = QRect(saved_x, saved_y, saved_w, saved_h)
+
+        if self._is_rect_visible_on_screens(target_rect, screens):
+            # 位置安全：直接還原儲存的幾何位置
+            self.setGeometry(target_rect)
+            if is_max:
+                self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        else:
+            # 超出顯示區域：自動安全還原至第一個螢幕
+            self._place_on_first_screen(first_screen, saved_w, saved_h, is_max)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setProperty("_has_been_shown", True)
+        # 喚醒或還原時再次安全校驗：防止於常駐系統匣期間外接螢幕被拔除
+        screens = QGuiApplication.screens()
+        if screens and not self._is_rect_visible_on_screens(self.geometry(), screens):
+            first_screen = screens[0]
+            self._place_on_first_screen(
+                first_screen,
+                preferred_w=self.width(),
+                preferred_h=self.height(),
+                is_max=self.isMaximized(),
+            )
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._save_window_state()
+
+    def closeEvent(self, event):
+        """攔截視窗關閉事件：儲存視窗位置，若啟用系統匣最小化則隱藏並退至系統匣"""
+        self._save_window_state()
+        if (
+            self.minimize_to_tray_on_close
+            and self.tray_manager
+            and hasattr(self.tray_manager, "tray_icon")
+            and self.tray_manager.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            self.tray_manager.on_window_minimized_to_tray()
+        else:
+            if hasattr(self, "health_timer") and self.health_timer.isActive():
+                self.health_timer.stop()
+            if self.current_worker and self.current_worker.isRunning():
+                self.current_worker.stop()
+            event.accept()

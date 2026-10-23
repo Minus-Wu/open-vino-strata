@@ -143,7 +143,22 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(gen_group)
 
-        # 5. 底部按鈕
+        # 5. 系統匣與桌面行為
+        tray_group = QGroupBox("系統匣與桌面行為 (Windows System Tray & Startup)")
+        tray_layout = QVBoxLayout(tray_group)
+        self.minimize_to_tray_check = QCheckBox("視窗按關閉 (✕) 時最小化至 Windows 系統匣常駐運作")
+        self.minimize_to_tray_check.setChecked(bool(self.config.get("minimize_to_tray", True)))
+        tray_layout.addWidget(self.minimize_to_tray_check)
+
+        from src.utils.autostart import is_autostart_supported, is_autostart_enabled
+        self.autostart_check = QCheckBox("Windows 使用者登入後自動在背景啟動 (靜默無黑窗模式)")
+        self.autostart_check.setChecked(is_autostart_enabled())
+        self.autostart_check.setEnabled(is_autostart_supported())
+        tray_layout.addWidget(self.autostart_check)
+
+        layout.addWidget(tray_group)
+
+        # 6. 底部按鈕
         btn_layout = QHBoxLayout()
         btn_layout.addStretch(1)
 
@@ -172,4 +187,6 @@ class SettingsDialog(QDialog):
             "kv_cache_precision": self.kv_combo.currentText(),
             "enable_mtp": self.mtp_check.isChecked(),
             "apply_strata_on_save": self.apply_strata_check.isChecked(),
+            "minimize_to_tray": self.minimize_to_tray_check.isChecked(),
+            "autostart_on_login": self.autostart_check.isChecked(),
         }
