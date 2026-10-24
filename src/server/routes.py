@@ -37,6 +37,7 @@ from src.server.schemas import (
 from src.engine.device_manager import device_manager, StrataConfig
 from src.engine.ov_strata_engine import OVStrataEngine, EngineMetrics
 from src.engine.parser import parse_full_output, IncrementalStreamParser
+from src.utils.paths import get_app_root
 
 logger = logging.getLogger("ov_strata.routes")
 router = APIRouter()
@@ -225,7 +226,7 @@ async def list_models(engine: OVStrataEngine = Depends(get_engine)):
 @router.get("/api/server/logs")
 async def api_get_server_logs(tail: int = 300):
     """讀取伺服器最新日誌 (供 Chat 介面或監控工具檢視)"""
-    project_root = Path(__file__).resolve().parent.parent.parent
+    project_root = get_app_root()
     log_path = project_root / "logs" / "server.log"
     if not log_path.exists():
         return {

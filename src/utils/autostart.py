@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Tuple
 
+from src.utils.paths import get_app_root, is_frozen
+
 REG_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_NAME = "OpenVINO-Strata"
 
@@ -22,11 +24,15 @@ def is_autostart_supported() -> bool:
 
 
 def get_project_root() -> Path:
-    return Path(__file__).resolve().parent.parent.parent
+    return get_app_root()
 
 
 def get_autostart_command() -> str:
-    """取得靜默背景啟動命令列字串 (使用 pythonw.exe 避免彈出主控台黑窗)"""
+    """取得靜默背景啟動命令列字串 (使用 pythonw.exe 或已打包之 .exe 避免彈出主控台黑窗)"""
+    if is_frozen():
+        exe_path = Path(sys.executable).resolve()
+        return f'"{exe_path}" --minimized'
+
     root = get_project_root()
     venv_pythonw = root / ".venv" / "Scripts" / "pythonw.exe"
     venv_python = root / ".venv" / "Scripts" / "python.exe"

@@ -15,9 +15,12 @@ import uvicorn
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-project_root = Path(__file__).resolve().parent
+project_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+from src.utils.paths import get_app_root
+project_root = get_app_root()
 
 from src.engine.device_manager import device_manager, StrataConfig
 from src.engine.ov_strata_engine import is_valid_ov_model_dir

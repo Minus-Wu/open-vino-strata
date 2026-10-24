@@ -38,6 +38,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import Qt, QTimer, QRegularExpression
 
+from src.utils.paths import get_app_root
+
 
 class ServerLogHighlighter(QSyntaxHighlighter):
     """日誌關鍵字語法高亮著色器"""
@@ -103,8 +105,7 @@ class ServerLogDialog(QDialog):
         self.setMinimumSize(720, 450)
 
         # 尋找專案 logs/server.log
-        root_dir = Path(__file__).resolve().parent.parent.parent
-        self.log_file_path = root_dir / "logs" / "server.log"
+        self.log_file_path = get_app_root() / "logs" / "server.log"
 
         self.all_lines: List[str] = []
         self._last_file_mtime: float = 0.0

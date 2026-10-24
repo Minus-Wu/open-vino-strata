@@ -25,15 +25,15 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QActio
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 
 from src.ui.api_worker import HealthCheckWorker, ModelControlWorker
+from src.utils.paths import get_asset_path
 
 logger = logging.getLogger("ov_strata.tray")
 
 
 def get_app_icon() -> QIcon:
     """取得專案高解析度圖示，若檔案不存在則自動以 QPainter 程式化生成科技感備援圖示"""
-    root_dir = Path(__file__).resolve().parent.parent.parent
-    ico_path = root_dir / "assets" / "icon.ico"
-    png_path = root_dir / "assets" / "icon.png"
+    ico_path = get_asset_path("icon.ico")
+    png_path = get_asset_path("icon.png")
 
     if ico_path.exists():
         icon = QIcon(str(ico_path))

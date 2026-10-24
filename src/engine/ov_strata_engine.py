@@ -31,6 +31,7 @@ from src.engine.device_manager import (
     ModelInspectResult,
 )
 from src.engine.parser import format_tools_system_instruction
+from src.utils.paths import get_app_root
 
 logger = logging.getLogger("ov_strata.engine")
 
@@ -99,7 +100,7 @@ class OVStrataEngine:
             self.strata_config.vram_budget_gb = pipeline_kwargs.pop("vram_budget_gb")
 
         self.pipeline_kwargs = pipeline_kwargs
-        self.project_root = Path(__file__).resolve().parent.parent.parent
+        self.project_root = get_app_root()
 
         # 支援同時搜尋本專案 models/ 與隔壁專案 ..\..\aio-mono\open-vino-llm\models
         default_dirs = [

@@ -8,7 +8,9 @@ OpenVINO-Strata Windows 系統匣常駐模式啟動入口 (run_tray.py)
 """
 
 import argparse
+import ctypes
 import logging
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from src.ui.main_window import MainWindow
 from src.ui.styles import DARK_THEME_QSS
 from src.ui.tray_manager import StrataTrayManager, get_app_icon
 from src.utils.autostart import set_autostart, is_autostart_enabled, get_autostart_status_info
+from src.utils.paths import get_app_root, is_frozen
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,21 +119,36 @@ def is_server_alive(base_url: str) -> bool:
 
 def start_background_server(args) -> subprocess.Popen:
     """以無主控台視窗的背景程序模式啟動 run_server.py，並將日誌持續導流至 logs/server.log"""
-    project_root = Path(__file__).resolve().parent
+    project_root = get_app_root()
     logs_dir = project_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     server_log_path = logs_dir / "server.log"
 
-    cmd = [
-        sys.executable,
-        str(project_root / "run_server.py"),
-        "--host",
-        str(args.host),
-        "--port",
-        str(args.port),
-        "--device",
-        str(args.device),
-    ]
+    if is_frozen():
+        # 打包單一執行檔模式：自身執行檔帶上 --server 參數於背景啟動伺服器程序
+        cmd = [
+            sys.executable,
+            "--server",
+            "--host",
+            str(args.host),
+            "--port",
+            str(args.port),
+            "--device",
+            str(args.device),
+        ]
+    else:
+        # 原始碼模式：呼叫 Python 解譯器運行 run_server.py
+        cmd = [
+            sys.executable,
+            str(project_root / "run_server.py"),
+            "--host",
+            str(args.host),
+            "--port",
+            str(args.port),
+            "--device",
+            str(args.device),
+        ]
+
     if args.model:
         cmd.extend(["--model", str(args.model)])
     if args.vram_budget:
@@ -156,6 +174,31 @@ def start_background_server(args) -> subprocess.Popen:
 
 
 def main() -> int:
+    multiprocessing.freeze_support()
+
+    # 在 Windows GUI 模式下若由終端命令列啟動，嘗試附加至父行程 Console 以輸出資訊
+    if sys.platform == "win32" and is_frozen():
+        try:
+            if ctypes.windll.kernel32.AttachConsole(-1):
+                if sys.stdout is None or getattr(sys.stdout, "closed", False):
+                    sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+                if sys.stderr is None or getattr(sys.stderr, "closed", False):
+                    sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # 支援單一執行檔內部分發至純伺服器或純 GUI 模式
+    if "--server" in sys.argv:
+        sys.argv.remove("--server")
+        import run_server
+        run_server.main()
+        return 0
+
+    if "--gui" in sys.argv:
+        sys.argv.remove("--gui")
+        import run_gui
+        return run_gui.main()
+
     args = parse_args()
 
     # 處理 Windows 登入自動啟動命令列指令

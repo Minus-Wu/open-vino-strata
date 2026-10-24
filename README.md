@@ -131,6 +131,26 @@
 .\.venv\Scripts\python.exe run_gui.py --url http://127.0.0.1:12223
 ```
 
+#### 方式 5：以獨立單一執行檔 (Standalone Executable) 運行
+透過 PyInstaller 打包的單一執行檔 `OpenVINO-Strata.exe` 具備完整 OpenVINO GenAI 執行期與多模式調度支援：
+```powershell
+# 1. 預設 Windows 系統匣常駐模式 (背景託管 API 伺服器並常駐右下角系統匣，點擊開啟 Chat UI)
+.\dist\OpenVINO-Strata.exe
+
+# 2. 開機靜默常駐 (Windows 登入後最小化至系統匣)
+.\dist\OpenVINO-Strata.exe --minimized
+
+# 3. 純背景 API 伺服器模式 (Headless Server)
+.\dist\OpenVINO-Strata.exe --server --port 12223 --device GPU --vram-budget 8.0
+
+# 4. 純桌面 Chat UI 模式 (連接至既有伺服器)
+.\dist\OpenVINO-Strata.exe --gui --url http://127.0.0.1:12223
+
+# 5. 命令列安裝 / 解除 Windows 登入自動啟動
+.\dist\OpenVINO-Strata.exe --install-startup
+.\dist\OpenVINO-Strata.exe --uninstall-startup
+```
+
 ---
 
 ## 🔌 API 端點一覽
@@ -146,6 +166,28 @@
 | `POST /api/models/unload` | PolyStrata | 立即釋放目前模型的 GPU VRAM 與系統 RAM |
 | `POST /api/strata/plan` | PolyStrata | 預先試算任意模型在指定 VRAM 預算下的 `OFFLOAD_RATIO` 與記憶體佔用 |
 | `GET  /health` | 系統監控 | 回傳即時 GPU VRAM 分配量、系統可用 RAM 與模型載入狀態 |
+
+---
+
+## 📦 打包為獨立單一執行檔 (Standalone Executable)
+
+專案支援將所有程式碼、OpenVINO 2026 C++ 執行期 DLL 動態函式庫、OpenVINO GenAI / Tokenizers、FastAPI、Uvicorn、PyQt6 桌面介面與應用程式圖示打包為單一 Windows 可執行檔（`OpenVINO-Strata.exe`，約 148 MB）。
+
+### 🛠️ 一鍵打包步驟
+
+```powershell
+# 方式 A：執行一鍵打包批次檔
+.\build_exe.bat
+
+# 方式 B：透過 Python 建置腳本 (可搭配 --clean 或略過冒煙測試 --no-smoke-test)
+.\.venv\Scripts\python.exe scripts/build_package.py
+```
+
+### 💡 單一執行檔特性與注意事項
+- **完全內含 OpenVINO 執行期**：打包時自動搜集並封裝 `openvino/libs`、`openvino_genai` 與 `openvino_tokenizers` 之所有動態連結庫 (`.dll`)。
+- **排除非執行期重型相依**：針對轉換工具鏈相依之 `torch`、`transformers` 等進行精準排除，建置時間僅約 1~2 分鐘，且體積由 >2 GB 大幅降至 ~148 MB。
+- **外部資源與模型載入**：執行檔啟動時以自身所在路徑為根目錄，自動讀取同層級的 `models/` 目錄並將日誌寫入同層級的 `logs/server.log`（亦可透過 `--models-dir` 自訂模型目錄）。
+- **內建自動冒煙測試**：建置完成後自動啟動並驗證 `--smoke-test`，確保資源解壓、PyQt6 與 OpenVINO 元件皆健全可用。
 
 ---
 
